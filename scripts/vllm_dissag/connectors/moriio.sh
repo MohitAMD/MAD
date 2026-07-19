@@ -142,6 +142,38 @@ connector_runtime_patch() {
     # needed, update MORI_REF and rebuild the image — no runtime library swap here.
     [ "${MODEL_NAME:-}" = "GLM-5.1-FP8" ] || return 0
     _glm_dsa_runtime_patch
+    _glm_determinism_runtime_patch
+}
+
+# GLM-5.1 DETERMINISM patchers (opt-in; additive). Applied AFTER the DSA patchers so
+# the sparse-MLA determinism gate can find `_use_persistent` (introduced by the
+# persistent-kernel gate patch or baked in-source). Runs regardless of
+# GLM_SKIP_PATCHERS because baked images do NOT carry these. The patchers only add a
+# DORMANT `if <env>==1` branch; runtime behavior is controlled by the env flags, so
+# applying them is a no-op unless the flags are set. Non-fatal (self-skip on missing
+# anchor) so they never break a run.
+_glm_determinism_runtime_patch() {
+    if [ "${GLM_SPARSE_MLA_DETERMINISTIC:-0}" != "1" ] && \
+       [ "${GLM_MOE_DETERMINISTIC_ROUTING:-0}" != "1" ]; then
+        return 0
+    fi
+    local _vllm_dir
+    _vllm_dir="$(python3 -c 'import vllm, os; print(os.path.dirname(vllm.__file__))' 2>/dev/null || true)"
+    if [ -z "${_vllm_dir}" ] || [ ! -d "${_vllm_dir}" ]; then
+        echo "Warning: [glm-det] cannot locate vLLM install dir; skipping determinism patchers." >&2
+        return 0
+    fi
+    local _patch_dir="${SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)}"
+    echo "[glm-det] SPARSE_MLA_DETERMINISTIC=${GLM_SPARSE_MLA_DETERMINISTIC:-0} MOE_DETERMINISTIC_ROUTING=${GLM_MOE_DETERMINISTIC_ROUTING:-0}; patching ${_vllm_dir}"
+    local _dp
+    for _dp in \
+        apply_glm_sparse_mla_deterministic.py \
+        apply_glm_moe_deterministic_routing.py; do
+        local _py="${_patch_dir}/${_dp}"
+        [ -f "${_py}" ] || { echo "Warning: [glm-det] ${_py} not found; skipping." >&2; continue; }
+        echo "[glm-det] applying ${_dp}"
+        python3 "${_py}" "${_vllm_dir}" 2>&1 || echo "Warning: [glm-det] ${_dp} failed (non-fatal)."
+    done
 }
 
 # GLM-5.1 DSA patchers (see connector_runtime_patch). Ported from MAD-private #338.

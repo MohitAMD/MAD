@@ -28,7 +28,26 @@ TIMEOUT = float(os.environ.get("NIAH_TIMEOUT", "1800"))
 # same stack). Run multiple seeds to distinguish real accuracy from single-needle
 # variance; the summary reports mean/min/max across seeds. Default 0,1,2.
 SEEDS = [int(x) for x in os.environ.get("NIAH_SEEDS", "0,1,2").split(",") if x.strip()]
+# NIAH_REPEAT>0: determinism probe -- run the SAME prompt (SEEDS[0]) N times instead
+# of N different seeds, to directly measure run-to-run variance on an identical request
+# (issue #47042's core claim). A non-deterministic stack yields different found-counts
+# / different dropped needles across the repeats of one fixed prompt.
+_REPEAT = int(os.environ.get("NIAH_REPEAT", "0"))
+if _REPEAT > 0:
+    SEEDS = [SEEDS[0]] * _REPEAT
 WARMUP = os.environ.get("NIAH_WARMUP", "1") == "1"
+# NIAH_THINKING: 0 (default) sends enable_thinking=False so the answer lands in
+#   `content` with a small max_tokens (fast retrieval smoke test).
+# 1 = FAITHFUL issue #47042 repro: leave thinking ON (do NOT set enable_thinking),
+#   pair with a large NIAH_MAXTOK (e.g. 2048) so the long-context DECODE path is
+#   actually exercised -- that decode is where the sparse-MLA collapse manifests.
+#   Animals are scored from reasoning_content too, so CoT hits still count.
+THINKING = os.environ.get("NIAH_THINKING", "0") == "1"
+# NIAH_ENDPOINT: "chat" (default) -> /v1/chat/completions (applies the GLM chat
+#   template + reasoning parser). "completions" -> /v1/completions with a raw prompt
+#   (NO chat template, NO reasoning parser) to isolate the decode path from the
+#   reasoning-parser machinery (matches the issue #47042 "no reasoning parser" note).
+ENDPOINT = os.environ.get("NIAH_ENDPOINT", "chat").strip().lower()
 # Warmup uses a generous timeout (cold compile of a long-context shape can take minutes)
 # and never fails the run — its only job is to trigger compilation before scoring.
 WARMUP_TIMEOUT = max(TIMEOUT, 1800.0)
@@ -57,84 +76,154 @@ def make_haystack(n_words, seed=0):
     return " ".join(words)
 
 
+def _endpoint_url():
+    """Resolve the request URL for the selected endpoint. For completions mode, rewrite
+    a chat URL (.../v1/chat/completions) to the raw text URL (.../v1/completions)."""
+    if ENDPOINT == "completions":
+        return (URL.replace("/v1/chat/completions", "/v1/completions")
+                   .replace("/chat/completions", "/completions"))
+    return URL
+
+
 def _request(n_words, seed, max_tokens, timeout):
-    """POST one NIAH request; return (message_dict, error_str). Exactly one is non-None."""
-    body = {
-        "model": MODEL,
-        "messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": "Find the animals in this list:\n\n" + make_haystack(n_words, seed)},
-        ],
-        "temperature": 0.0,
-        "max_tokens": max_tokens,
-        # Thinking models (e.g. GLM-5.1) emit chain-of-thought into a separate
-        # reasoning field and leave `content` empty until the final answer; with a
-        # small max_tokens the answer never appears in `content` and the score is a
-        # false 0/10. Disable thinking so the answer lands in `content` directly.
-        "chat_template_kwargs": {"enable_thinking": False},
-    }
+    """POST one NIAH request; return (message_like_dict, error_str). Exactly one is
+    non-None. The returned dict always exposes the generated text under 'content'
+    (+ reasoning fields for the chat path) so run() can score it uniformly."""
+    haystack = make_haystack(n_words, seed)
+    if ENDPOINT == "completions":
+        # Raw /v1/completions: no chat template, no reasoning parser. Fold the system
+        # instruction + task into a single plain prompt.
+        body = {
+            "model": MODEL,
+            "prompt": SYSTEM + "\n\nFind the animals in this list:\n\n" + haystack + "\n\nAnimals:",
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+        }
+    else:
+        body = {
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": SYSTEM},
+                {"role": "user", "content": "Find the animals in this list:\n\n" + haystack},
+            ],
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+        }
+        # Thinking models (e.g. GLM-5.1) emit chain-of-thought into a separate reasoning
+        # field and leave `content` empty until the final answer; with a small max_tokens
+        # the answer never appears in `content` and the score is a false 0/10. Default
+        # (NIAH_THINKING=0) disables thinking so the answer lands in `content` directly.
+        # NIAH_THINKING=1 leaves thinking ON to match issue #47042 (stresses the
+        # long-context decode path where the sparse-MLA collapse shows up).
+        if not THINKING:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
     data = json.dumps(body).encode()
-    req = urllib.request.Request(URL, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(_endpoint_url(), data=data, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read())["choices"][0]["message"], None
+            choice = json.loads(r.read())["choices"][0]
+            # Normalize: chat -> choice["message"]; completions -> {"content": choice["text"]}
+            return (choice.get("message") if "message" in choice else {"content": choice.get("text", "")}), None
     except Exception as e:
         return None, str(e)
 
 
-def warmup(n_words):
-    """One throwaway request per length so first-hit compile happens off the scored path.
-    Never fatal: a warmup timeout just means the shape is still compiling; the scored
-    request will pay whatever remains (bounded by NIAH_TIMEOUT)."""
-    _, err = _request(n_words, seed=0, max_tokens=8, timeout=WARMUP_TIMEOUT)
-    status = "ok" if err is None else ("timeout/err: %s" % err)
-    print("words=%6d  [warmup] %s" % (n_words, status), flush=True)
-
-
-def run(n_words, seed=0):
-    # Sentinel: None = timeout/transport error (NOT a wrong answer); int = score 0..10.
-    msg, err = _request(n_words, seed, MAXTOK, TIMEOUT)
+def run(n_words, seed, max_tokens):
+    """Return (score, found_list, err). score/found are None on timeout/transport error
+    (NOT a wrong answer); otherwise score is 0..10 and found is the retrieved animals."""
+    msg, err = _request(n_words, seed, max_tokens, TIMEOUT)
     if err is not None:
-        print("words=%6d  seed=%d  TIMEOUT/ERROR  %s" % (n_words, seed, err), flush=True)
-        return None
+        return None, None, err
     # Score content plus any reasoning field (some servers surface CoT as
     # `reasoning` or `reasoning_content`) so a thinking model is never mis-scored.
     text = ((msg.get("content") or "") + " "
             + (msg.get("reasoning_content") or "") + " "
             + (msg.get("reasoning") or "")).lower()
     found = sorted(a for a in ANIMALS if a in text)
-    print("words=%6d  seed=%d  found=%2d/10  %s" % (n_words, seed, len(found), found), flush=True)
-    return len(found)
+    return len(found), found, None
+
+
+# --- report header labels -----------------------------------------------------
+# NIAH_TOPO: free-text hardware/topology label for the header (e.g. "MI300X 1P1D EP8").
+TOPO = os.environ.get("NIAH_TOPO", "MI300X")
+N = len(ANIMALS)
+
+# NIAH_COMBOS: optional per-case "ISL/OSL,ISL/OSL" list (input words / output max_tokens).
+# When set it OVERRIDES the flat NIAH_WORDS x NIAH_MAXTOK grid so each case carries its
+# own decode budget -- needed for ISL/OSL shapes like 96000/32000 (96k-word context,
+# 32k-token output cap). ISL ~= input tokens (1 filler word ~= 1 token).
+_combos_raw = os.environ.get("NIAH_COMBOS", "").strip()
+if _combos_raw:
+    CASES = []
+    for _pair in _combos_raw.split(","):
+        _pair = _pair.strip()
+        if not _pair:
+            continue
+        _isl, _sep, _osl = _pair.partition("/")
+        CASES.append((int(_isl), int(_osl) if _osl.strip() else MAXTOK))
+else:
+    CASES = [(w, MAXTOK) for w in WORDS]
+
+
+def _endpoint_line():
+    # Reflects the actual request path + reasoning/thinking mode.
+    try:
+        from urllib.parse import urlparse
+        path = urlparse(_endpoint_url()).path or _endpoint_url()
+    except Exception:
+        path = _endpoint_url()
+    if ENDPOINT == "completions":
+        mode = "raw prompt, no reasoning parser"
+    else:
+        mode = "thinking on" if THINKING else "thinking off (enable_thinking=False)"
+    return "%s (%s)" % (path, mode)
 
 
 def main():
     if not MODEL:
         print("NIAH_MODEL must be set (the served model path/name)", file=sys.stderr)
         sys.exit(2)
-    print("=== NIAH retrieval test ===", flush=True)
-    print("url=%s  model=%s  sizes=%s  seeds=%s  warmup=%s" % (URL, MODEL, WORDS, SEEDS, WARMUP), flush=True)
-    # Warmup pass: compile every shape once before scoring, so cold JIT never lands on a
-    # scored/gated request (the common cause of false 0/10 or timeout on a fresh boot).
+    model_short = os.path.basename(MODEL.rstrip("/")) or MODEL
+    # Warmup FIRST (quietly) so the cold-compile of each shape happens off the scored
+    # path and outside the clean report; only surface a warmup problem. One per unique ISL.
     if WARMUP:
-        print("=== NIAH warmup (one throwaway request per length) ===", flush=True)
-        for n in WORDS:
-            warmup(n)
-    results = {}  # n_words -> list of scores across seeds (None = timeout/error, not a wrong answer)
-    for n in WORDS:
-        results[n] = [run(n, s) for s in SEEDS]
-    print("=== NIAH summary (mean/min/max across %d seed(s)) ===" % len(SEEDS), flush=True)
-    for n in WORDS:
-        scored = results[n]
-        vals = [v for v in scored if v is not None]
-        n_to = sum(1 for v in scored if v is None)  # timeouts/errors, excluded from mean
-        if not vals:
-            print("  words=%6d  NO-RESULT (%d/%d timed out or errored — likely cold compile; "
-                  "raise NIAH_TIMEOUT or keep NIAH_WARMUP=1)" % (n, n_to, len(scored)), flush=True)
+        for n in sorted({isl for isl, _ in CASES}):
+            _, err = _request(n, seed=0, max_tokens=8, timeout=WARMUP_TIMEOUT)
+            if err is not None:
+                print("  [warmup] words=%6d still compiling/err: %s" % (n, err), flush=True)
+
+    bar = "=" * 65
+    print(bar, flush=True)
+    print("Repro: vllm-project/vllm#47042", flush=True)
+    print("Model: %s | %s" % (model_short, TOPO), flush=True)
+    print("Endpoint: %s" % _endpoint_line(), flush=True)
+    print(bar, flush=True)
+
+    for isl, osl in CASES:
+        # ~1 token/word is a fine approximation for this filler-word haystack.
+        print("\n--- ~%d words (~%d tok in / %d tok out max) ---" % (isl, isl, osl), flush=True)
+        scores = []
+        for i, s in enumerate(SEEDS, 1):  # trial index is 1-based
+            score, found, err = run(isl, s, osl)
+            if err is not None:
+                print("  words=%6d  trial=%d  TIMEOUT/ERR  \u274c  %s" % (isl, i, err), flush=True)
+                continue
+            mark = "\u2705" if score == N else "\u274c"
+            print("  words=%6d  trial=%d  found=%2d/%d  %s  %s"
+                  % (isl, i, score, N, mark, found), flush=True)
+            scores.append(score)
+        if not scores:
+            print("  Summary: NO-RESULT (all trials timed out/errored)", flush=True)
             continue
-        mean = sum(vals) / len(vals)
-        extra = ("  [%d timeout/err excluded]" % n_to) if n_to else ""
-        print("  words=%6d  mean=%.1f/10  min=%d  max=%d  (n=%d)%s"
-              % (n, mean, min(vals), max(vals), len(vals), extra), flush=True)
+        mn, mx = min(scores), max(scores)
+        if mn == mx:
+            verdict = "\u2705 DETERMINISTIC" if mn == N else "\u26a0\ufe0f  DETERMINISTIC (but %d/%d)" % (mn, N)
+        else:
+            verdict = "\u26a0\ufe0f  NONDETERMINISTIC (\u0394=%d)" % (mx - mn)
+        print("  Summary: min=%d max=%d %s" % (mn, mx, verdict), flush=True)
+
+    print("\n" + bar, flush=True)
+    print("DONE", flush=True)
 
 
 if __name__ == "__main__":
