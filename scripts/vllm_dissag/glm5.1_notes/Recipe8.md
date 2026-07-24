@@ -79,6 +79,56 @@ Jobs 206023 (1P1D EP8), 206022 (2P2D EP16).
 
 Disagg served cleanly; niah + aa_lcr pass on both topologies; the suite fast-fails at `livecodebench_mini` (LCB harness subprocess error, root-cause pending) which gates the rest.
 
+## Performance (throughput sweep)
+
+Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup=2. Jobs: **206036** (1P1D EP8), **206047** (2P2D EP16). Both jobs were still running the 96k/32k pass at capture time (see note); the main-shape grid is complete.
+
+### 1P1D EP8 (job 206036)
+
+| ISL/OSL | Concurrency | Req/s | Output tok/s | **Total tok/s** | Median TTFT (ms) | Median TPOT (ms) |
+|---|---|---|---|---|---|---|
+| 8000/1000 | 8 | 0.08 | 81.2 | **730.9** | 3887 | 92.9 |
+| 8000/1000 | 32 | 0.31 | 314.5 | **2830.8** | 4776 | 93.8 |
+| 8000/1000 | 64 | 0.60 | 601.9 | **5417.0** | 6429 | 93.8 |
+| 8000/1000 | 128 | 1.12 | 1116.7 | **10050.6** | 5975 | 94.3 |
+| 8000/1000 | 256 | 1.80 | 1796.6 | **16169.5** | 22490 | 94.9 |
+| 4000/4000 | 8 | 0.02 | 86.4 | **172.7** | 2020 | 92.2 |
+| 4000/4000 | 32 | 0.08 | 339.3 | **678.5** | 4742 | 92.7 |
+| 4000/4000 | 64 | 0.17 | 671.3 | **1342.6** | 4744 | 93.1 |
+| 4000/4000 | 128 | 0.33 | 1309.8 | **2619.6** | 6656 | 94.4 |
+| 4000/4000 | 256 | 0.64 | 2557.5 | **5114.9** | 8867 | 94.8 |
+| 8000/4000 | 8 | 0.02 | 84.6 | **253.8** | 4153 | 93.4 |
+| 8000/4000 | 32 | 0.08 | 331.0 | **993.0** | 4180 | 94.6 |
+| 8000/4000 | 64 | 0.16 | 654.1 | **1962.3** | 4371 | 94.6 |
+| 8000/4000 | 128 | 0.32 | 1277.1 | **3831.3** | 6276 | 95.2 |
+| 8000/4000 | 256 | 0.61 | 2459.3 | **7377.8** | 6407 | 94.8 |
+| 96000/32000 | 8 | 0.004 | 84.5 | **338.2** | 81174 | 92.0 |
+
+### 2P2D EP16 (job 206047)
+
+| ISL/OSL | Concurrency | Req/s | Output tok/s | **Total tok/s** | Median TTFT (ms) | Median TPOT (ms) |
+|---|---|---|---|---|---|---|
+| 8000/1000 | 8 | 0.08 | 79.4 | **714.1** | 3848 | 96.3 |
+| 8000/1000 | 32 | 0.30 | 298.0 | **2682.4** | 5283 | 97.5 |
+| 8000/1000 | 64 | 0.57 | 573.4 | **5160.9** | 6603 | 97.1 |
+| 8000/1000 | 128 | 1.10 | 1101.1 | **9909.5** | 6164 | 97.3 |
+| 8000/1000 | 256 | 1.87 | 1872.6 | **16853.2** | 12838 | 97.6 |
+| 4000/4000 | 8 | 0.02 | 83.0 | **166.1** | 2175 | 95.7 |
+| 4000/4000 | 32 | 0.08 | 325.4 | **650.8** | 4066 | 97.0 |
+| 4000/4000 | 64 | 0.16 | 640.6 | **1281.2** | 4311 | 97.3 |
+| 4000/4000 | 128 | 0.32 | 1261.0 | **2522.0** | 5102 | 98.8 |
+| 4000/4000 | 256 | 0.62 | 2480.3 | **4960.5** | 8106 | 98.3 |
+| 8000/4000 | 8 | 0.02 | 81.5 | **244.5** | 3925 | 96.9 |
+| 8000/4000 | 32 | 0.08 | 321.4 | **964.2** | 6005 | 96.9 |
+| 8000/4000 | 64 | 0.16 | 637.0 | **1911.0** | 5130 | 97.5 |
+| 8000/4000 | 128 | 0.31 | 1233.2 | **3699.7** | 6848 | 98.5 |
+| 8000/4000 | 256 | 0.59 | 2379.7 | **7139.1** | 7371 | 98.4 |
+| 96000/32000 | 8/32/64/128 | — | — | — | — | — |
+
+> Note: at capture time both jobs were still on the 96k/32k pass — 1P1D has con=8 (338 tok/s, TTFT ~81 s); 2P2D 96k had not yet produced a result. The 96k rows will be filled in when the pass completes.
+
+Peak total throughput observed: **~16.2k tok/s (1P1D)** and **~16.9k tok/s (2P2D)** at 8000/1000 @ con=256. At matched shapes/concurrency the two topologies are within a few percent on throughput; 2P2D shows slightly higher TPOT (~97–99 ms vs ~93–95 ms) reflecting the cross-node EP16 decode.
+
 ## Deployment configurations
 
 | Topology | EP width | Status |
