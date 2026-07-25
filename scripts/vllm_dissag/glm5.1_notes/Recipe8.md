@@ -103,6 +103,7 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/4000 | 128 | 0.32 | 1277.1 | **3831.3** | 239.5 | 6276 | 95.2 |
 | 8000/4000 | 256 | 0.61 | 2459.3 | **7377.8** | 461.1 | 6407 | 94.8 |
 | 96000/32000 | 8 | 0.004 | 84.5 | **338.2** | 21.1 | 81174 | 92.0 |
+| 96000/32000 | 32 | 0.01 | 328.6 | **1314.3** | 82.1 | 91338 | 92.7 |
 
 ### 2P2D EP16 (job 206047) — 32 GPUs
 
@@ -123,9 +124,11 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/4000 | 64 | 0.16 | 637.0 | **1911.0** | 59.7 | 5130 | 97.5 |
 | 8000/4000 | 128 | 0.31 | 1233.2 | **3699.7** | 115.6 | 6848 | 98.5 |
 | 8000/4000 | 256 | 0.59 | 2379.7 | **7139.1** | 223.1 | 7371 | 98.4 |
-| 96000/32000 | 8/32/64/128 | — | — | — | — | — | — |
+| 96000/32000 | 8 | 0.004 | 82.0 | **327.8** | 10.2 | 76731 | 95.1 |
+| 96000/32000 | 32 | 0.01 | 319.4 | **1277.5** | 39.9 | 85310 | 95.8 |
+| 96000/32000 | 64 | 0.02 | 625.3 | **2501.0** | 78.2 | 87787 | 95.8 |
 
-> Note: at capture time both jobs were still on the 96k/32k pass — 1P1D has con=8 (338 tok/s, TTFT ~81 s); 2P2D 96k had not yet produced a result. The 96k rows will be filled in when the pass completes.
+> Note: the 96k/32k pass is **partial** — both jobs hit the 24 h wall (TIMEOUT). Completed: 1P1D con 8/32; 2P2D con 8/32/64. Higher concurrencies (1P1D 64/128, 2P2D 128) did not finish at these very long shapes (32k-token outputs at 96k context → TTFT ~77–91 s, so each concurrency level takes hours).
 
 ### 1P1D vs 2P2D comparison (matched shape/concurrency)
 
@@ -148,6 +151,8 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/4000 | 64 | 1962.3 | 1911.0 | 0.97× | 122.6 | 59.7 | 0.49× |
 | 8000/4000 | 128 | 3831.3 | 3699.7 | 0.97× | 239.5 | 115.6 | 0.48× |
 | 8000/4000 | 256 | 7377.8 | 7139.1 | 0.97× | 461.1 | 223.1 | 0.48× |
+| 96000/32000 | 8 | 338.2 | 327.8 | 0.97× | 21.1 | 10.2 | 0.48× |
+| 96000/32000 | 32 | 1314.3 | 1277.5 | 0.97× | 82.1 | 39.9 | 0.49× |
 
 Peak total throughput observed: **~16.2k tok/s (1P1D)** and **~16.9k tok/s (2P2D)** at 8000/1000 @ con=256. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.04× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
 
