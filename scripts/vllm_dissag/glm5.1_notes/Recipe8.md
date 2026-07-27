@@ -193,6 +193,7 @@ Note: 270/512 requests succeeded (~47% load-shed under residual MoRIIO KV-transf
 | 8000/1000 | 64 | 5417.0 | 5160.9 | 0.95× | 338.6 | 161.3 | 0.48× |
 | 8000/1000 | 128 | 10050.6 | 9909.5 | 0.99× | 628.2 | 309.7 | 0.49× |
 | 8000/1000 | 256 | 16169.5 | 16853.2 | 1.04× | 1010.6 | 526.7 | 0.52× |
+| 8000/1000 | 512 | 17852.8 | 18508.7 | 1.04× | 1115.8 | 578.4 | 0.52× |
 | 4000/4000 | 8 | 172.7 | 166.1 | 0.96× | 10.8 | 5.2 | 0.48× |
 | 4000/4000 | 32 | 678.5 | 650.8 | 0.96× | 42.4 | 20.3 | 0.48× |
 | 4000/4000 | 64 | 1342.6 | 1281.2 | 0.95× | 83.9 | 40.0 | 0.48× |
@@ -203,10 +204,11 @@ Note: 270/512 requests succeeded (~47% load-shed under residual MoRIIO KV-transf
 | 8000/4000 | 64 | 1962.3 | 1911.0 | 0.97× | 122.6 | 59.7 | 0.49× |
 | 8000/4000 | 128 | 3831.3 | 3699.7 | 0.97× | 239.5 | 115.6 | 0.48× |
 | 8000/4000 | 256 | 7377.8 | 7139.1 | 0.97× | 461.1 | 223.1 | 0.48× |
+| 32000/2000 | 128 | 13629.9 | 14562.5 | 1.07× | 851.9 | 455.1 | 0.53× |
 | 96000/32000 | 8 | 338.2 | 327.8 | 0.97× | 21.1 | 10.2 | 0.48× |
 | 96000/32000 | 32 | 1314.3 | 1277.5 | 0.97× | 82.1 | 39.9 | 0.49× |
 
-Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and **~19.5k tok/s (2P2D, 8000/1000 @ con=1024)**. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.04× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
+Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and **~19.5k tok/s (2P2D, 8000/1000 @ con=1024)**. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.07× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
 
 ## Deployment configurations
 
@@ -246,7 +248,7 @@ Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and
 - **Patches:** `docker/patches/patch_pr47766_v024.py`, `patch_aiter_mla_qh64_fold.py` (A), `patch_glm_dsa_force_persistent.py` (B), `patch_glm_sched_kv_xfer_stale_guard.py`, `patch_aiter_gpuless_import.py`, `rocminfo_buildshim.sh`, `patch_aiter_baton_selfheal_v2.py`; `scripts/vllm_dissag/apply_glm_dsa_indexer_warmup_fix.py`.
 - **AITER repro (for #4365):** `docker/patches/repro_aiter_mla_qh64_gfx942_fault.py`, `run_repro_qh64_fault.sh`.
 - **vLLM #49649 repro/fix:** `tests/kernels/attention/test_rocm_aiter_mla_sparse_persistent_guard.py` + patch `vllm_49649_fix.patch` (branch `mohitamd/fix-49649-sparse-mla-persistent-guard`).
-- **Eval/perf orchestration:** `scripts/vllm_dissag/glm5.1_notes/sbatch_{1p1d,2p2d}_evalsuite_fromscratch.sh`, `run_accsuite_disagg_in_container.sh`, `sbatch_{1p1d,2p2d}_perf_fromscratch.sh`. Post-LCB accuracy re-runs: `sbatch_{1p1d,2p2d}_evalsuite_remaining.sh` + `run_accsuite_remaining_in_container.sh`.
+- **Eval/perf orchestration:** `scripts/vllm_dissag/glm5.1_notes/sbatch_{1p1d,2p2d}_evalsuite_fromscratch.sh`, `run_accsuite_disagg_in_container.sh`, `sbatch_{1p1d,2p2d}_perf_fromscratch.sh` (gap-fills: `sbatch_{1p1d,2p2d}_perf_gapfill.sh`). Post-LCB accuracy re-runs: `sbatch_{1p1d,2p2d}_evalsuite_remaining.sh` + `run_accsuite_remaining_in_container.sh`.
 - **Companion reports (same branch):** `scripts/vllm_dissag/glm5.1_notes/AITER_QH64_GPU_FAULT_REPORT.md`.
 
 ## Relationship to other recipes
