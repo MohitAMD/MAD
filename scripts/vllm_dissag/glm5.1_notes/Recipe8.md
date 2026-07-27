@@ -4,6 +4,11 @@
 
 Confluence: https://amd.atlassian.net/wiki/spaces/DCGPUAIST/pages/1814116072
 
+## Caveats
+
+- Hard requirement: vLLM pinned to v0.25.1 and AITER v0.1.18. Not tested with previous versions.
+- Prefill and Decode nodes must be on the same networking switch for RDMA communication to work.
+
 ## What this is
 
 GLM-5.1-FP8 (`zai-org`, `GlmMoeDsaForCausalLM`: MLA + DSA sparse attention, 256 experts top-8) served on **AMD MI300X** (gfx942) under **prefill/decode-disaggregated WideEP**, using **AMD MoRI** (MoRI-EP dispatch/combine + MoRI-IO RDMA KV transfer over RoCEv2).
@@ -42,6 +47,14 @@ Image: `glm5.1-fp8-disagg:mi300x-fromscratch`.
 | rocm.py GCN-arch circular-import fix | inline (Dockerfile) | concurrent EP-worker boot crash | ✅ |
 | MoRIIO/WideEP runtime deps | inline (Dockerfile) | `msgpack quart aiohttp pyzmq blinker` (MoRIIO connector import-time deps) | ✅ |
 
+## Salient features
+
+- **WideEP PD-disaggregated** serving: prefill and decode on separate nodes, KV moved over RDMA via MoRI-IO; experts dispatched/combined via MoRI-EP all2all.
+- **DSA sparse attention** (block-size 1 indexer) + **MLA**, fp8 Q / fp8 KV, `block_size=1`.
+- **Fully from-scratch, reproducible build** — one Dockerfile, all pins from source; auditable end to end.
+- **Both 1P1D EP8 and 2P2D EP16 run** (2P2D was blocked in Recipe 7).
+- **Cold-start resilience**: aiter JIT baton self-heal (native in v0.1.18) + node-local JIT cache; GPU-less-build import shims (rocminfo shim, arch_info fallback) that no-op on real GPUs.
+
 ## Serve flags
 
 ```
@@ -68,16 +81,23 @@ Extremes (8k, 96k) effectively deterministic; residual ±1–2 variance at mid-r
 
 ## Accuracy suite (`glm51_suite` pre_release)
 
-Jobs 206023 (1P1D EP8), 206022 (2P2D EP16).
+From-scratch image. Initial full-suite run: jobs 206023 (1P1D EP8), 206022 (2P2D EP16). The suite runs fast-fail (`stop_on_hard_fail`), so `livecodebench_mini` hard-failing initially skipped the remaining P1/P2 benchmarks; those were completed in dedicated post-LCB re-runs (LCB skipped) on the same image.
 
 | Benchmark | Metric | 1P1D EP8 | 2P2D EP16 | Status |
 |---|---|---|---|---|
 | niah_single_2 | retrieval_success | 1.0 | 0.98 | pass |
 | aa_lcr_mini | accuracy | 0.40 | 0.50 | pass |
-| livecodebench_mini | pass@1 | — | — | hard-fail (harness subprocess exit 1) |
-| mmlu_pro_50 / aime_2025_mini / gsm8k_100 / gpqa_diamond_mini | accuracy | — | — | skipped (fast-fail gate) |
+| mmlu_pro_50 | accuracy | 0.821 | 0.797 | pass |
+| gsm8k_100 | accuracy | 0.940 | 0.960 | pass |
+| gpqa_diamond_mini | accuracy | 0.12 | 0.10 | warn (below 0.45 preferred) |
+| aime_2025_mini | exact_match | — | — | not completed (harness / duration limit) |
+| livecodebench_mini | pass@1 | — | — | hard-fail (harness metrics-assertion crash) |
 
-Disagg served cleanly; niah + aa_lcr pass on both topologies; the suite fast-fails at `livecodebench_mini` (LCB harness subprocess error, root-cause pending) which gates the rest.
+Disagg served cleanly; **mmlu_pro (0.82/0.80) and gsm8k (0.94/0.96) pass on both topologies**, plus niah and aa_lcr. The three P1/P2 items that needed follow-up:
+
+- **livecodebench_mini** — hard-fails inside the LiveCodeBench harness (not a serving fault): the code-execution scoring pass crashes with `AssertionError` in `compute_code_generation_metrics.py` and writes no `*_eval.json`. NIAH + AA-LCR passing confirm the image itself is correct.
+- **gpqa_diamond_mini** — the suite ships no local GPQA data (official `Idavidrein/gpqa` is gated); items staged from a public mirror scored 0.12/0.10, below the 0.45 preferred threshold. The sub-random result is most likely a scoring artifact (`benchmark_max_tokens=8` truncates a reasoning model before it emits a clear answer letter) rather than a true capability floor — pending audit.
+- **aime_2025_mini** — not completed. lm-eval drives AIME over raw `/v1/completions`, which bypasses the chat template's `enable_thinking:false`, so GLM-5.1 emits full ~32k-token reasoning per problem (~35 min/sample). The reliable lm-eval config is `num_concurrent=1` (the async aiohttp path crashes with "Session/Connector is closed" on long generations), so 30 samples run serially (~17.6 h) and exceed the 10 h serving-hold window.
 
 ## Performance (throughput sweep)
 
@@ -104,8 +124,12 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/4000 | 64 | 0.16 | 654.1 | **1962.3** | 122.6 | 4371 | 94.6 |
 | 8000/4000 | 128 | 0.32 | 1277.1 | **3831.3** | 239.5 | 6276 | 95.2 |
 | 8000/4000 | 256 | 0.61 | 2459.3 | **7377.8** | 461.1 | 6407 | 94.8 |
+| 32000/2000 | 128 § | 0.40 | 801.8 | **13629.9** | 851.9 | 85490 | 93.5 |
+| 32000/8000 | 128 § | 0.15 | 1217.9 | **6089.6** | 380.6 | 23728 | 94.4 |
 | 96000/32000 | 8 | 0.004 | 84.5 | **338.2** | 21.1 | 81174 | 92.0 |
 | 96000/32000 | 32 | 0.01 | 328.6 | **1314.3** | 82.1 | 91338 | 92.7 |
+
+§ 32000/2000 and 32000/8000 @ con=128 from job **206985** (dedicated con=128 sweep, same image); 512/512 successful. The matching 2P2D 32k con=128 points are pending (a fresh run is required — the prior attempt hit a bring-up barrier timeout).
 
 † con=512 from job **206294** (dedicated high-concurrency run, same image). At 8000/4000 @ con=512 the run hit a **deterministic MoRIIO KV-transfer saturation ceiling** (`Deferred write task … expired after 600 s`), so no data point — con=512 is beyond sustainable concurrency for the heaviest sub-96k shape on 1P1D EP8.
 
@@ -136,6 +160,16 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 ‡ 32000/8000 from job **206761** (dedicated run, same image). Only con=8 produced a clean result; con≥32 at this 32k-context/8k-output shape did not complete a measurement (bring-up/scheduling contention during the multi-job window), so the ladder is incomplete.
 
 > Note: the 96k/32k pass is **partial** — both jobs hit the 24 h wall (TIMEOUT). Completed: 1P1D con 8/32; 2P2D con 8/32/64. Higher concurrencies (1P1D 64/128, 2P2D 128) did not finish at these very long shapes (32k-token outputs at 96k context → TTFT ~77–91 s, so each concurrency level takes hours).
+
+### 2P4D EP32 (job 207083) — 96k/32k @ con=128 (48 GPUs)
+
+96k/32k @ con=128 **deadlocks on 1P1D/2P2D**: the decode replica cannot hold 128 concurrent 96k-context sequences, so MoRIIO deferred KV writes expire (`… expired after 600 s (remote blocks never arrived)`) and the run hangs. **2P4D (2 prefill + 4 decode, EP32) adds decode KV capacity and clears the fatal deadlock** — the run completes instead of hanging, though it still partially load-sheds at this extreme shape.
+
+| ISL/OSL | Concurrency | Req/s | Output tok/s | **Total tok/s** | **Total tok/s/GPU** | Median TTFT (ms) | Median TPOT (ms) | Successful |
+|---|---|---|---|---|---|---|---|---|
+| 96000/32000 | 128 | 0.01 | 177.5 | **712.0** | 14.8 | 79751 | 113.5 | 270/512 |
+
+Note: 270/512 requests succeeded (~47% load-shed under residual MoRIIO KV-transfer stalls). This is a capacity/latency ceiling at 96k × con=128, not a crash — 2P4D is the minimum topology that produces a con=128 result at this shape. (Raising `VLLM_MORIIO_DEFERRED_TIMEOUT_S`/`_TRANSFER_TIMEOUT_S` further should reduce the shed rate; in this run the override was not taking effect and the deferred writes still expired at the 600 s default.)
 
 ### 1P1D vs 2P2D comparison (matched shape/concurrency)
 
@@ -177,7 +211,9 @@ Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and
 |---|---|---|
 | aiter #4363 (issue) + #4365 (PR, Patch A) | ROCm/aiter | qh64 fp8 decode GPU-fault at page_size=1 on gfx942; gate native-qh64 to page_size==64 + repro `op_tests/test_mla_qh64_gfx942_pagesize1.py` |
 | vLLM #49649 (issue) | vllm-project/vllm | persistent-kernel gate unsafe for gqa_ratio=64 fp8 |
+| vLLM #49755 (PR, Patch B) | vllm-project/vllm | adds `sparse_mla_requires_persistent()` invariant + fail-fast guard in `rocm_aiter_mla_sparse.py` + CPU-only reproducer test (branch `mohitamd/fix-49649-sparse-mla-persistent-guard`) |
 | aiter #4364 (issue) | ROCm/aiter | qh16 fp8 sparse decode run-to-run nondeterminism (residual ±1–2 needle) |
+| aiter #4378 (PR) | ROCm/aiter | fix for aiter #4364 (qh16 nondeterminism) |
 
 ## Environment knobs
 
@@ -198,9 +234,19 @@ Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and
 - **Dockerfiles:** `docker/GLM5.1-FP8.disagg.MI300X.from-scratch.Dockerfile` (+ `.CHANGELOG.md`), `docker/GLM5.1-FP8.disagg.MI300X.share.Dockerfile`.
 - **Patches:** `docker/patches/patch_pr47766_v024.py`, `patch_aiter_mla_qh64_fold.py` (A), `patch_glm_dsa_force_persistent.py` (B), `patch_glm_sched_kv_xfer_stale_guard.py`, `patch_aiter_gpuless_import.py`, `rocminfo_buildshim.sh`, `patch_aiter_baton_selfheal_v2.py`; `scripts/vllm_dissag/apply_glm_dsa_indexer_warmup_fix.py`.
 - **AITER repro (for #4365):** `docker/patches/repro_aiter_mla_qh64_gfx942_fault.py`, `run_repro_qh64_fault.sh`.
-- **Eval/perf orchestration:** `scripts/vllm_dissag/glm5.1_notes/sbatch_{1p1d,2p2d}_evalsuite_fromscratch.sh`, `run_accsuite_disagg_in_container.sh`, `sbatch_{1p1d,2p2d}_perf_fromscratch.sh`.
+- **vLLM #49649 repro/fix:** `tests/kernels/attention/test_rocm_aiter_mla_sparse_persistent_guard.py` + patch `vllm_49649_fix.patch` (branch `mohitamd/fix-49649-sparse-mla-persistent-guard`).
+- **Eval/perf orchestration:** `scripts/vllm_dissag/glm5.1_notes/sbatch_{1p1d,2p2d}_evalsuite_fromscratch.sh`, `run_accsuite_disagg_in_container.sh`, `sbatch_{1p1d,2p2d}_perf_fromscratch.sh`. Post-LCB accuracy re-runs: `sbatch_{1p1d,2p2d}_evalsuite_remaining.sh` + `run_accsuite_remaining_in_container.sh`.
+- **Companion reports (same branch):** `scripts/vllm_dissag/glm5.1_notes/AITER_QH64_GPU_FAULT_REPORT.md`.
 
 ## Relationship to other recipes
 
 - **Recipe 7** (vLLM v0.24.0 + PR#47766, minimal in-place patch on the stock image): parent recipe; 2P2D EP16 was blocked (MoRI wide-EP device assert), focus on the determinism study. Recipe 8 rebases to **v0.25.1 from source** with **AITER v0.1.18 + MoRI 42e895472** + qh16-fold + force-persistent, which **unblocks 2P2D EP16** and serves both topologies.
 - **Recipe 4** (GLM-5.1-FP8 TP=8, single node): colocated correctness/determinism control.
+
+## Acknowledgements
+
+- Ravi Gupta (Ravi.Gupta@amd.com)
+- Shiksha Patel (Shiksha.Patel@amd.com)
+- Janet Tseng (Janet.Tseng@amd.com)
+- Pradeep Sakhamoori (Pradeep.Sakhamoori@amd.com)
+- Eliot Li (Eliot.Li@amd.com)
