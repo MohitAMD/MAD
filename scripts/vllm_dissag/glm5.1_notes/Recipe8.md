@@ -129,7 +129,7 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 96000/32000 | 8 | 0.004 | 84.5 | **338.2** | 21.1 | 81174 | 92.0 |
 | 96000/32000 | 32 | 0.01 | 328.6 | **1314.3** | 82.1 | 91338 | 92.7 |
 
-§ 32000/2000 and 32000/8000 @ con=128 from job **206985** (dedicated con=128 sweep, same image); 512/512 successful. The matching 2P2D 32k con=128 points are pending (a fresh run is required — the prior attempt hit a bring-up barrier timeout).
+§ 32000/2000 and 32000/8000 @ con=128 from job **206985** (dedicated con=128 sweep, same image); 512/512 successful. The matching 2P2D 32k/2k con=128 point is now captured (see 2P2D table ‖, job 206760 = 14562.5 tok/s); 2P2D 32k/8k con≥32 remains pending.
 
 † con=512 from job **206294** (dedicated high-concurrency run, same image). At 8000/4000 @ con=512 the run hit a **deterministic MoRIIO KV-transfer saturation ceiling** (`Deferred write task … expired after 600 s`), so no data point — con=512 is beyond sustainable concurrency for the heaviest sub-96k shape on 1P1D EP8.
 
@@ -142,6 +142,8 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/1000 | 64 | 0.57 | 573.4 | **5160.9** | 161.3 | 6603 | 97.1 |
 | 8000/1000 | 128 | 1.10 | 1101.1 | **9909.5** | 309.7 | 6164 | 97.3 |
 | 8000/1000 | 256 | 1.87 | 1872.6 | **16853.2** | 526.7 | 12838 | 97.6 |
+| 8000/1000 | 512 ¶ | 2.06 | 2056.5 | **18508.7** | 578.4 | 126682 | 97.7 |
+| 8000/1000 | 1024 ¶ | 2.17 | 2166.6 | **19499.2** | 609.3 | 349346 | 97.5 |
 | 4000/4000 | 8 | 0.02 | 83.0 | **166.1** | 5.2 | 2175 | 95.7 |
 | 4000/4000 | 32 | 0.08 | 325.4 | **650.8** | 20.3 | 4066 | 97.0 |
 | 4000/4000 | 64 | 0.16 | 640.6 | **1281.2** | 40.0 | 4311 | 97.3 |
@@ -155,9 +157,18 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 96000/32000 | 8 | 0.004 | 82.0 | **327.8** | 10.2 | 76731 | 95.1 |
 | 96000/32000 | 32 | 0.01 | 319.4 | **1277.5** | 39.9 | 85310 | 95.8 |
 | 96000/32000 | 64 | 0.02 | 625.3 | **2501.0** | 78.2 | 87787 | 95.8 |
+| 32000/2000 | 8 ‖ | 0.04 | 75.9 | **1290.1** | 40.3 | 15224 | 96.5 |
+| 32000/2000 | 32 ‖ | 0.14 | 280.8 | **4774.0** | 149.2 | 22049 | 97.4 |
+| 32000/2000 | 64 ‖ | 0.26 | 527.1 | **8960.9** | 280.0 | 21254 | 97.3 |
+| 32000/2000 | 128 ‖ | 0.43 | 856.6 | **14562.5** | 455.1 | 56367 | 97.1 |
+| 32000/2000 | 256 ‖ | 0.47 | 938.7 | **15958.4** | 498.7 | 301612 | 97.2 |
 | 32000/8000 | 8 ‡ | 0.01 | 81.4 | **407.0** | 12.7 | 18542 | 95.6 |
 
-‡ 32000/8000 from job **206761** (dedicated run, same image). Only con=8 produced a clean result; con≥32 at this 32k-context/8k-output shape did not complete a measurement (bring-up/scheduling contention during the multi-job window), so the ladder is incomplete.
+‖ 32000/2000 full ladder from job **206760** (dedicated run, same image); con 8/32/64/128/256 all 100% successful. con=512 hit the MoRIIO KV-transfer saturation ceiling (1988/2048, TTFT ~11.6 min) so it is omitted. This supplies the 2P2D 32k/2k con=128 point (14562.5 tok/s).
+
+‡ 32000/8000 from job **206761** (dedicated run, same image). Only con=8 produced a clean result; con≥32 at this 32k-context/8k-output shape did not complete a measurement (bring-up/scheduling contention during the multi-job window), so that ladder remains incomplete (incl. 32k/8k con=128).
+
+¶ 8000/1000 con=512/1024 from job **206759** (dedicated high-concurrency run, same image); both 100% successful. con=1024 is the observed **2P2D peak (~19.5k tok/s)**; TTFT grows steeply (349 s median at con=1024) as the offered load exceeds steady-state capacity.
 
 > Note: the 96k/32k pass is **partial** — both jobs hit the 24 h wall (TIMEOUT). Completed: 1P1D con 8/32; 2P2D con 8/32/64. Higher concurrencies (1P1D 64/128, 2P2D 128) did not finish at these very long shapes (32k-token outputs at 96k context → TTFT ~77–91 s, so each concurrency level takes hours).
 
@@ -195,7 +206,7 @@ Note: 270/512 requests succeeded (~47% load-shed under residual MoRIIO KV-transf
 | 96000/32000 | 8 | 338.2 | 327.8 | 0.97× | 21.1 | 10.2 | 0.48× |
 | 96000/32000 | 32 | 1314.3 | 1277.5 | 0.97× | 82.1 | 39.9 | 0.49× |
 
-Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and **~16.9k tok/s (2P2D, 8000/1000 @ con=256)**. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.04× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
+Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and **~19.5k tok/s (2P2D, 8000/1000 @ con=1024)**. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.04× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
 
 ## Deployment configurations
 
