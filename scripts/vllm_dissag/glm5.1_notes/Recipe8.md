@@ -81,7 +81,7 @@ Disagg served cleanly; niah + aa_lcr pass on both topologies; the suite fast-fai
 
 ## Performance (throughput sweep)
 
-Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup=2. Jobs: **206036** (1P1D EP8), **206047** (2P2D EP16). Both jobs were still running the 96k/32k pass at capture time (see note); the main-shape grid is complete. GPU counts: **1P1D = 16 GPUs** (2 nodes × 8), **2P2D = 32 GPUs** (4 × 8); `Total tok/s/GPU` = Total tok/s ÷ GPU count.
+Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup=2. Jobs: **206036** (1P1D EP8), **206047** (2P2D EP16); extended by **206294** (1P1D con=512 †) and **206761** (2P2D 32k/8k ‡). The main-shape grid is complete; the 96k/32k pass is partial (see note). GPU counts: **1P1D = 16 GPUs** (2 nodes × 8), **2P2D = 32 GPUs** (4 × 8); `Total tok/s/GPU` = Total tok/s ÷ GPU count.
 
 ### 1P1D EP8 (job 206036) — 16 GPUs
 
@@ -92,11 +92,13 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/1000 | 64 | 0.60 | 601.9 | **5417.0** | 338.6 | 6429 | 93.8 |
 | 8000/1000 | 128 | 1.12 | 1116.7 | **10050.6** | 628.2 | 5975 | 94.3 |
 | 8000/1000 | 256 | 1.80 | 1796.6 | **16169.5** | 1010.6 | 22490 | 94.9 |
+| 8000/1000 | 512 † | 1.98 | 1983.6 | **17852.8** | 1115.8 | 140330 | 94.2 |
 | 4000/4000 | 8 | 0.02 | 86.4 | **172.7** | 10.8 | 2020 | 92.2 |
 | 4000/4000 | 32 | 0.08 | 339.3 | **678.5** | 42.4 | 4742 | 92.7 |
 | 4000/4000 | 64 | 0.17 | 671.3 | **1342.6** | 83.9 | 4744 | 93.1 |
 | 4000/4000 | 128 | 0.33 | 1309.8 | **2619.6** | 163.7 | 6656 | 94.4 |
 | 4000/4000 | 256 | 0.64 | 2557.5 | **5114.9** | 319.7 | 8867 | 94.8 |
+| 4000/4000 | 512 † | 1.23 | 4930.7 | **9861.3** | 616.3 | 10193 | 94.9 |
 | 8000/4000 | 8 | 0.02 | 84.6 | **253.8** | 15.9 | 4153 | 93.4 |
 | 8000/4000 | 32 | 0.08 | 331.0 | **993.0** | 62.1 | 4180 | 94.6 |
 | 8000/4000 | 64 | 0.16 | 654.1 | **1962.3** | 122.6 | 4371 | 94.6 |
@@ -104,6 +106,8 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/4000 | 256 | 0.61 | 2459.3 | **7377.8** | 461.1 | 6407 | 94.8 |
 | 96000/32000 | 8 | 0.004 | 84.5 | **338.2** | 21.1 | 81174 | 92.0 |
 | 96000/32000 | 32 | 0.01 | 328.6 | **1314.3** | 82.1 | 91338 | 92.7 |
+
+† con=512 from job **206294** (dedicated high-concurrency run, same image). At 8000/4000 @ con=512 the run hit a **deterministic MoRIIO KV-transfer saturation ceiling** (`Deferred write task … expired after 600 s`), so no data point — con=512 is beyond sustainable concurrency for the heaviest sub-96k shape on 1P1D EP8.
 
 ### 2P2D EP16 (job 206047) — 32 GPUs
 
@@ -127,6 +131,9 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 96000/32000 | 8 | 0.004 | 82.0 | **327.8** | 10.2 | 76731 | 95.1 |
 | 96000/32000 | 32 | 0.01 | 319.4 | **1277.5** | 39.9 | 85310 | 95.8 |
 | 96000/32000 | 64 | 0.02 | 625.3 | **2501.0** | 78.2 | 87787 | 95.8 |
+| 32000/8000 | 8 ‡ | 0.01 | 81.4 | **407.0** | 12.7 | 18542 | 95.6 |
+
+‡ 32000/8000 from job **206761** (dedicated run, same image). Only con=8 produced a clean result; con≥32 at this 32k-context/8k-output shape did not complete a measurement (bring-up/scheduling contention during the multi-job window), so the ladder is incomplete.
 
 > Note: the 96k/32k pass is **partial** — both jobs hit the 24 h wall (TIMEOUT). Completed: 1P1D con 8/32; 2P2D con 8/32/64. Higher concurrencies (1P1D 64/128, 2P2D 128) did not finish at these very long shapes (32k-token outputs at 96k context → TTFT ~77–91 s, so each concurrency level takes hours).
 
@@ -154,7 +161,7 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 96000/32000 | 8 | 338.2 | 327.8 | 0.97× | 21.1 | 10.2 | 0.48× |
 | 96000/32000 | 32 | 1314.3 | 1277.5 | 0.97× | 82.1 | 39.9 | 0.49× |
 
-Peak total throughput observed: **~16.2k tok/s (1P1D)** and **~16.9k tok/s (2P2D)** at 8000/1000 @ con=256. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.04× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
+Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and **~16.9k tok/s (2P2D, 8000/1000 @ con=256)**. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.04× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
 
 ## Deployment configurations
 

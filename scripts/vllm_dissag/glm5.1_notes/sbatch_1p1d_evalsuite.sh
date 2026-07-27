@@ -4,8 +4,13 @@
 # Accuracy Eval Suite + the NIAH smoke probe against it, to compare 1P1D
 # (WideEP disagg) vs the single-node (no-WideEP) baseline in the results image.
 #
-# Same image as the single-node baseline (vllm-disagg:glmv5.1-v0.24-local-batonfix)
-# so kernels/patches are identical; the ONLY variable is colocated-vs-disaggregated.
+# Uses the REBASE image (vllm-disagg:glmv5.1-v0.24-local-batonfix) -- the proven-stable
+# 1P1D disagg build. NOTE: the minimal pr47766 image was tried here (job 204425) and is
+# NOT disagg-stable: it tripped a MoRIIO KV-xfer completion race
+# (scheduler.py:2448 _update_from_kv_xfer_finished: assert req_id in self.requests) on
+# the first completion (and also hits the fp8 gqa64 asm_mla abort in EP8). The 20-commit
+# rebase carries the connector/scheduler fixes that make long disagg runs survive; the
+# minimal image is for the single-node / auditable-PR#47766-accuracy story only.
 #
 # Flow (all on node0 = prefill master + proxy, where vllm-router binds :30000):
 #   1. stage image + preflight (2 nodes)
@@ -28,7 +33,8 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --spread-job
+# Same-leaf placement (REQUIRED for disagg KV transfer): allocate within ONE leaf switch.
+#SBATCH --switches=1
 #SBATCH --time=12:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append

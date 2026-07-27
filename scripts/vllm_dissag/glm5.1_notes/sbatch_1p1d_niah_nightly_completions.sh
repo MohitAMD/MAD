@@ -18,7 +18,8 @@
 #SBATCH --nodes=2                 # 1P + 1D
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --spread-job
+# Same-leaf placement (REQUIRED for disagg KV transfer): allocate within ONE leaf switch.
+#SBATCH --switches=1
 #SBATCH --time=12:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
