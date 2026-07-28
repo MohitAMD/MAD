@@ -124,12 +124,17 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 8000/4000 | 64 | 0.16 | 654.1 | **1962.3** | 122.6 | 4371 | 94.6 |
 | 8000/4000 | 128 | 0.32 | 1277.1 | **3831.3** | 239.5 | 6276 | 95.2 |
 | 8000/4000 | 256 | 0.61 | 2459.3 | **7377.8** | 461.1 | 6407 | 94.8 |
+| 32000/2000 | 8 ♦ | 0.04 | 78.3 | **1330.9** | 83.2 | 19662 | 91.9 |
+| 32000/2000 | 32 ♦ | 0.15 | 290.6 | **4940.0** | 308.8 | 22694 | 92.7 |
+| 32000/2000 | 64 ♦ | 0.27 | 531.8 | **9040.8** | 565.1 | 23140 | 94.2 |
 | 32000/2000 | 128 § | 0.40 | 801.8 | **13629.9** | 851.9 | 85490 | 93.5 |
 | 32000/8000 | 128 § | 0.15 | 1217.9 | **6089.6** | 380.6 | 23728 | 94.4 |
 | 96000/32000 | 8 | 0.004 | 84.5 | **338.2** | 21.1 | 81174 | 92.0 |
 | 96000/32000 | 32 | 0.01 | 328.6 | **1314.3** | 82.1 | 91338 | 92.7 |
 
-§ 32000/2000 and 32000/8000 @ con=128 from job **206985** (dedicated con=128 sweep, same image); 512/512 successful. The matching 2P2D 32k/2k con=128 point is now captured (see 2P2D table ‖, job 206760 = 14562.5 tok/s); 2P2D 32k/8k con≥32 remains pending.
+§ 32000/2000 and 32000/8000 @ con=128 from job **206985** (dedicated con=128 sweep, same image); 512/512 successful. The matching 2P2D 32k/2k con=128 point is captured in the 2P2D table (‖, job 206760 = 14562.5 tok/s); the 2P2D 32k/8k ladder is now complete (see ♠).
+
+♦ 1P1D 32000/2000 con 8/32/64 from job **207569** (gap-fill, same image); 100% successful. con=256 wedged on 1P1D (MoRIIO deadlock ceiling — 2P2D runs it fine), so it is omitted; 1P1D 32k/8k con 8/32/64/256 and 8k/1k @1024 were blocked by that wedge and remain pending.
 
 † con=512 from job **206294** (dedicated high-concurrency run, same image). At 8000/4000 @ con=512 the run hit a **deterministic MoRIIO KV-transfer saturation ceiling** (`Deferred write task … expired after 600 s`), so no data point — con=512 is beyond sustainable concurrency for the heaviest sub-96k shape on 1P1D EP8.
 
@@ -149,26 +154,34 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 4000/4000 | 64 | 0.16 | 640.6 | **1281.2** | 40.0 | 4311 | 97.3 |
 | 4000/4000 | 128 | 0.32 | 1261.0 | **2522.0** | 78.8 | 5102 | 98.8 |
 | 4000/4000 | 256 | 0.62 | 2480.3 | **4960.5** | 155.0 | 8106 | 98.3 |
+| 4000/4000 | 512 ♠ | 1.15 | 4612.7 | **9225.3** | 288.3 | 8891 | 102.6 |
 | 8000/4000 | 8 | 0.02 | 81.5 | **244.5** | 7.6 | 3925 | 96.9 |
 | 8000/4000 | 32 | 0.08 | 321.4 | **964.2** | 30.1 | 6005 | 96.9 |
 | 8000/4000 | 64 | 0.16 | 637.0 | **1911.0** | 59.7 | 5130 | 97.5 |
 | 8000/4000 | 128 | 0.31 | 1233.2 | **3699.7** | 115.6 | 6848 | 98.5 |
 | 8000/4000 | 256 | 0.59 | 2379.7 | **7139.1** | 223.1 | 7371 | 98.4 |
+| 8000/4000 | 512 ♠ | 1.05 | 4216.6 | **12649.7** | 395.3 | 6305 | 105.9 |
 | 32000/2000 | 8 ‖ | 0.04 | 75.9 | **1290.1** | 40.3 | 15224 | 96.5 |
 | 32000/2000 | 32 ‖ | 0.14 | 280.8 | **4774.0** | 149.2 | 22049 | 97.4 |
 | 32000/2000 | 64 ‖ | 0.26 | 527.1 | **8960.9** | 280.0 | 21254 | 97.3 |
 | 32000/2000 | 128 ‖ | 0.43 | 856.6 | **14562.5** | 455.1 | 56367 | 97.1 |
 | 32000/2000 | 256 ‖ | 0.47 | 938.7 | **15958.4** | 498.7 | 301612 | 97.2 |
 | 32000/8000 | 8 ‡ | 0.01 | 81.4 | **407.0** | 12.7 | 18542 | 95.6 |
+| 32000/8000 | 32 ♠ | 0.04 | 320.4 | **1602.2** | 50.1 | 22097 | 95.6 |
+| 32000/8000 | 64 ♠ | 0.08 | 629.0 | **3145.1** | 98.3 | 21663 | 95.9 |
+| 32000/8000 | 128 ♠ | 0.15 | 1203.5 | **6017.4** | 188.0 | 21637 | 96.5 |
+| 32000/8000 | 256 ♠ | 0.28 | 2227.4 | **11137.1** | 348.0 | 23902 | 97.0 |
 | 96000/32000 | 8 | 0.004 | 82.0 | **327.8** | 10.2 | 76731 | 95.1 |
 | 96000/32000 | 32 | 0.01 | 319.4 | **1277.5** | 39.9 | 85310 | 95.8 |
 | 96000/32000 | 64 | 0.02 | 625.3 | **2501.0** | 78.2 | 87787 | 95.8 |
 
 ‖ 32000/2000 full ladder from job **206760** (dedicated run, same image); con 8/32/64/128/256 all 100% successful. con=512 hit the MoRIIO KV-transfer saturation ceiling (1988/2048, TTFT ~11.6 min) so it is omitted. This supplies the 2P2D 32k/2k con=128 point (14562.5 tok/s).
 
-‡ 32000/8000 from job **206761** (dedicated run, same image). Only con=8 produced a clean result; con≥32 at this 32k-context/8k-output shape did not complete a measurement (bring-up/scheduling contention during the multi-job window), so that ladder remains incomplete (incl. 32k/8k con=128).
+‡ 32000/8000 con=8 from job **206761** (dedicated run, same image); the rest of the ladder (con 32/64/128/256) was later filled by job **207570** (see ♠).
 
 ¶ 8000/1000 con=512/1024 from job **206759** (dedicated high-concurrency run, same image); both 100% successful. con=1024 is the observed **2P2D peak (~19.5k tok/s)**; TTFT grows steeply (349 s median at con=1024) as the offered load exceeds steady-state capacity.
+
+♠ 2P2D gap-fill from job **207570**: 4000/4000 & 8000/4000 @ con=512 (100% successful) and 32000/8000 con 32/64/128/256 (32k/8k@256 shed 1/1024, the rest 100%).
 
 > Note: the 96k/32k pass is **partial** — both jobs hit the 24 h wall (TIMEOUT). Completed: 1P1D con 8/32; 2P2D con 8/32/64. Higher concurrencies (1P1D 64/128, 2P2D 128) did not finish at these very long shapes (32k-token outputs at 96k context → TTFT ~77–91 s, so each concurrency level takes hours).
 
