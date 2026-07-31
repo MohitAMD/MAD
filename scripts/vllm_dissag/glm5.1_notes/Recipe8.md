@@ -99,9 +99,27 @@ Disagg served cleanly; **mmlu_pro (0.82/0.80) and gsm8k (0.94/0.96) pass on both
 - **gpqa_diamond_mini** — the suite ships no local GPQA data (official `Idavidrein/gpqa` is gated); items staged from a public mirror scored 0.12/0.10, below the 0.45 preferred threshold. The sub-random result is most likely a scoring artifact (`benchmark_max_tokens=8` truncates a reasoning model before it emits a clear answer letter) rather than a true capability floor — pending audit.
 - **aime_2025_mini** — not completed. lm-eval drives AIME over raw `/v1/completions`, which bypasses the chat template's `enable_thinking:false`, so GLM-5.1 emits full ~32k-token reasoning per problem (~35 min/sample). The reliable lm-eval config is `num_concurrent=1` (the async aiohttp path crashes with "Session/Connector is closed" on long generations), so 30 samples run serially (~17.6 h) and exceed the 10 h serving-hold window.
 
+## Single-node TP=8 accuracy vs Recipe 4
+
+Run on the **same from-scratch image** in single-node colocated `vllm serve --tensor-parallel-size 8` mode (no disagg / MoRI / router), thinking-ON. This isolates model/kernel accuracy from the disaggregation transport — the disagg suite above hit MoRIIO KV-transfer degradation late in long runs (dropped decode requests), whereas single-node served cleanly end-to-end. Jobs: **209460** (full 7-benchmark suite) and **209764** (aime + gpqa re-run with the Recipe-4-matched serve flags `--reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice --chat-template-content-format string` and restored reasoning budgets: aime `max_gen_toks=32768`, gpqa `max_tokens=16384`). LiveCodeBench ran without the harness metrics-assertion crash on this run.
+
+| Benchmark | Metric | Recipe 8 (single-node TP=8) | Recipe 4 (single-node TP=8) | Note |
+|---|---|---|---|---|
+| niah_single_2 | retrieval_success | 1.000 | 1.000 | match |
+| aa_lcr_mini | accuracy | 1.000 | 1.000 | match |
+| gsm8k_100 | accuracy | 0.960 | — | R8 only |
+| mmlu_pro_50 | accuracy | 0.824 | — | R8 only |
+| livecodebench_mini | pass@1 | **0.652** | 0.440 | R8 > R4 |
+| gpqa_diamond_mini | accuracy | 0.380 | 0.700 | below R4 (genuine gap) |
+| aime_2025_mini | exact_match | 0.167 | 0.367 | below R4 (truncation-limited) |
+
+- **NIAH and AA-LCR match** Recipe 4 (both 1.000); **LiveCodeBench is higher** (0.652 vs 0.440); MMLU-Pro (0.824) and GSM8K (0.960) add coverage Recipe 4 did not report.
+- **aime_2025_mini (0.167)** is **truncation-limited**: even at the 32768 generation cap, ~24/30 responses run to the cap mid-reasoning without emitting a `\boxed` answer (only 6/30 boxed — the rise from 2/30 at the earlier 16384 cap confirms the reasoning parser is working). Escaping it needs a larger generation cap (>32768).
+- **gpqa_diamond_mini (0.380)** is **not** truncation-limited (~6.8k tokens/sample avg, well under 16384) — a genuine accuracy gap vs Recipe 4's 0.700, most likely a build/numerics difference (vLLM 0.25.1 + qh16-fold / force-persistent + AITER 0.1.18 vs Recipe 4's stock vLLM 0.24.0 + AITER 0.1.13.post1). Pending investigation.
+
 ## Performance (throughput sweep)
 
-Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup=2. Jobs: **206036** (1P1D EP8), **206047** (2P2D EP16); extended by **206294** (1P1D con=512 †) and **206761** (2P2D 32k/8k ‡). The main-shape grid is complete; the 96k/32k pass is partial (see note). GPU counts: **1P1D = 16 GPUs** (2 nodes × 8), **2P2D = 32 GPUs** (4 × 8); `Total tok/s/GPU` = Total tok/s ÷ GPU count.
+Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup=2. Jobs: **206036** (1P1D EP8), **206047** (2P2D EP16); extended by **206294** (1P1D con=512 †), **206761** (2P2D 32k/8k ‡), and gap-fills **207569**/**207885** (1P1D 32k ♦◊) and **207570** (2P2D ♠). The main-shape grid is complete; the 96k/32k pass is partial (see note). GPU counts: **1P1D = 16 GPUs** (2 nodes × 8), **2P2D = 32 GPUs** (4 × 8); `Total tok/s/GPU` = Total tok/s ÷ GPU count.
 
 ### 1P1D EP8 (job 206036) — 16 GPUs
 
@@ -128,13 +146,18 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 | 32000/2000 | 32 ♦ | 0.15 | 290.6 | **4940.0** | 308.8 | 22694 | 92.7 |
 | 32000/2000 | 64 ♦ | 0.27 | 531.8 | **9040.8** | 565.1 | 23140 | 94.2 |
 | 32000/2000 | 128 § | 0.40 | 801.8 | **13629.9** | 851.9 | 85490 | 93.5 |
+| 32000/8000 | 8 ◊ | 0.01 | 83.9 | **419.3** | 26.2 | 19874 | 92.9 |
+| 32000/8000 | 32 ◊ | 0.04 | 329.4 | **1646.9** | 102.9 | 21971 | 92.9 |
+| 32000/8000 | 64 ◊ | 0.08 | 640.0 | **3200.0** | 200.0 | 23250 | 93.5 |
 | 32000/8000 | 128 § | 0.15 | 1217.9 | **6089.6** | 380.6 | 23728 | 94.4 |
 | 96000/32000 | 8 | 0.004 | 84.5 | **338.2** | 21.1 | 81174 | 92.0 |
 | 96000/32000 | 32 | 0.01 | 328.6 | **1314.3** | 82.1 | 91338 | 92.7 |
 
 § 32000/2000 and 32000/8000 @ con=128 from job **206985** (dedicated con=128 sweep, same image); 512/512 successful. The matching 2P2D 32k/2k con=128 point is captured in the 2P2D table (‖, job 206760 = 14562.5 tok/s); the 2P2D 32k/8k ladder is now complete (see ♠).
 
-♦ 1P1D 32000/2000 con 8/32/64 from job **207569** (gap-fill, same image); 100% successful. con=256 wedged on 1P1D (MoRIIO deadlock ceiling — 2P2D runs it fine), so it is omitted; 1P1D 32k/8k con 8/32/64/256 and 8k/1k @1024 were blocked by that wedge and remain pending.
+♦ 1P1D 32000/2000 con 8/32/64 from job **207569** (gap-fill, same image); 100% successful. con=256 wedged on 1P1D (MoRIIO deadlock ceiling — 2P2D runs it fine), so it is omitted.
+
+◊ 1P1D 32000/8000 con 8/32/64 from job **207885** (gap-fill #2, same image); 100% successful. con=256 is omitted (same 1P1D MoRIIO deadlock ceiling as 32k/2k). The 8000/1000 @ con=1024 cell is **not attainable on 1P1D**: it tail-deadlocks reproducibly at ~95–96% completion (the last ~5% of decode KV transfers never drain, hanging >2 h with zero progress). This is a topology capacity ceiling, not a timeout-tunable stall (raising the MoRIIO defer timeout does not help — writes already sit far longer than any timeout and never complete); use 2P2D+ for 8k/1k at con≥512 (see ¶).
 
 † con=512 from job **206294** (dedicated high-concurrency run, same image). At 8000/4000 @ con=512 the run hit a **deterministic MoRIIO KV-transfer saturation ceiling** (`Deferred write task … expired after 600 s`), so no data point — con=512 is beyond sustainable concurrency for the heaviest sub-96k shape on 1P1D EP8.
 
@@ -183,17 +206,69 @@ Long-context throughput sweep, `/v1/completions`, `ignore_eos`, per-shape warmup
 
 ♠ 2P2D gap-fill from job **207570**: 4000/4000 & 8000/4000 @ con=512 (100% successful) and 32000/8000 con 32/64/128/256 (32k/8k@256 shed 1/1024, the rest 100%).
 
-> Note: the 96k/32k pass is **partial** — both jobs hit the 24 h wall (TIMEOUT). Completed: 1P1D con 8/32; 2P2D con 8/32/64. Higher concurrencies (1P1D 64/128, 2P2D 128) did not finish at these very long shapes (32k-token outputs at 96k context → TTFT ~77–91 s, so each concurrency level takes hours).
+> Note: the 96k/32k pass is **partial** — both jobs hit the 24 h wall (TIMEOUT). Completed: 1P1D con 8/32; 2P2D con 8/32/64. Higher concurrencies (1P1D 64/128, 2P2D 128) did not finish at these very long shapes (32k-token outputs at 96k context → TTFT ~77–91 s, so each concurrency level takes hours). The 96k/32k @ con=128 point is captured separately on 2P4D/4P4D (below), since it deadlocks on 1P1D/2P2D at the default timeout.
 
-### 2P4D EP32 (job 207083) — 96k/32k @ con=128 (48 GPUs)
+### 2P4D EP32 (jobs 208491 + 207083) — 48 GPUs
 
-96k/32k @ con=128 **deadlocks on 1P1D/2P2D**: the decode replica cannot hold 128 concurrent 96k-context sequences, so MoRIIO deferred KV writes expire (`… expired after 600 s (remote blocks never arrived)`) and the run hangs. **2P4D (2 prefill + 4 decode, EP32) adds decode KV capacity and clears the fatal deadlock** — the run completes instead of hanging, though it still partially load-sheds at this extreme shape.
+2P4D = 2 prefill + 4 decode (6 nodes, EP32). The peak-throughput sweep is job **208491** (⧫); the 96k/32k @ con=128 point is job **207083** (partial-shed stress run). GPU count = **48**, so `Total tok/s/GPU` = Total ÷ 48.
 
 | ISL/OSL | Concurrency | Req/s | Output tok/s | **Total tok/s** | **Total tok/s/GPU** | Median TTFT (ms) | Median TPOT (ms) | Successful |
 |---|---|---|---|---|---|---|---|---|
+| 8000/1000 | 8 ⧫ | 0.08 | 77.0 | **693.1** | 14.4 | 3761 | 98.8 | 32/32 |
+| 8000/1000 | 32 ⧫ | 0.30 | 296.8 | **2670.7** | 55.6 | 5965 | 99.3 | 128/128 |
+| 8000/1000 | 64 ⧫ | 0.56 | 555.4 | **4999.0** | 104.1 | 5278 | 103.4 | 256/256 |
+| 8000/1000 | 128 ⧫ | 0.99 | 993.2 | **8938.8** | 186.2 | 6743 | 108.6 | 512/512 |
+| 8000/1000 | 256 ⧫ | 1.65 | 1648.0 | **14832.0** | 309.0 | 11818 | 118.2 | 1024/1024 |
+| 8000/1000 | 512 ⧫ | 2.00 | 2003.3 | **18029.6** | 375.6 | 88507 | 138.1 | 2048/2048 |
+| 8000/1000 | 1024 ⧫ | 2.13 | 2130.6 | **19175.2** | 399.5 | 311544 | 138.4 | 4096/4096 |
+| 4000/4000 | 8 ⧫ | 0.02 | 80.3 | **160.6** | 3.3 | 2273 | 98.9 | 32/32 |
+| 4000/4000 | 32 ⧫ | 0.08 | 317.6 | **635.1** | 13.2 | 5048 | 99.0 | 128/128 |
+| 4000/4000 | 64 ⧫ | 0.15 | 597.7 | **1195.4** | 24.9 | 4852 | 105.5 | 256/256 |
+| 4000/4000 | 256 ⧫ | 0.52 | 2081.0 | **4161.9** | 86.7 | 6740 | 118.0 | 1024/1024 |
+| 4000/4000 | 512 ⧫ | 0.85 | 3417.4 | **6834.8** | 142.4 | 7236 | 142.4 | 2048/2048 |
+| 8000/4000 | 8 ⧫ | 0.02 | 79.6 | **238.7** | 5.0 | 4170 | 99.1 | 32/32 |
+| 8000/4000 | 32 ⧫ | 0.08 | 313.9 | **941.9** | 19.6 | 4532 | 99.9 | 128/128 |
+| 8000/4000 | 64 ⧫ | 0.15 | 591.0 | **1772.9** | 36.9 | 6454 | 105.1 | 256/256 |
+| 8000/4000 | 128 ⧫ | 0.27 | 1099.1 | **3297.2** | 68.7 | 6658 | 110.3 | 512/512 |
+| 8000/4000 | 256 ⧫ | 0.50 | 2005.9 | **6017.8** | 125.4 | 6267 | 119.3 | 1024/1024 |
+| 8000/4000 | 512 ⧫ | 0.81 | 3222.5 | **9667.4** | 201.4 | 8243 | 144.4 | 2048/2048 |
+| 32000/2000 | 8 ⧫ | 0.04 | 73.6 | **1251.2** | 26.1 | 16854 | 99.3 | 32/32 |
+| 32000/2000 | 128 ⧫ | 0.41 | 819.8 | **13937.2** | 290.4 | 25989 | 116.0 | 512/512 |
+| 32000/2000 | 256 ⧫ | 0.45 | 906.9 | **15417.3** | 321.2 | 277177 | 115.5 | 1024/1024 |
+| 32000/8000 | 128 ⧫ | 0.13 | 1024.4 | **5122.0** | 106.7 | 22865 | 115.1 | 512/512 |
+| 32000/8000 | 256 ⧫ | 0.22 | 1728.5 | **8642.7** | 180.1 | 22204 | 131.1 | 1024/1024 |
 | 96000/32000 | 128 | 0.01 | 177.5 | **712.0** | 14.8 | 79751 | 113.5 | 270/512 |
 
-Note: 270/512 requests succeeded (~47% load-shed under residual MoRIIO KV-transfer stalls). This is a capacity/latency ceiling at 96k × con=128, not a crash — 2P4D is the minimum topology that produces a con=128 result at this shape. (Raising `VLLM_MORIIO_DEFERRED_TIMEOUT_S`/`_TRANSFER_TIMEOUT_S` further should reduce the shed rate; in this run the override was not taking effect and the deferred writes still expired at the 600 s default.)
+**2P4D peak = 19,175 tok/s at 8k/1k @ con=1024.** con=2048 did **not** climb further — it plateaued and tail-stalled at 97% (7923/8192), so throughput rolls off past con=1024.
+
+⧫ Job **208491** peak-finding sweep (from-scratch image, 6 nodes). All listed cells 100% successful. Sweep still in progress — remaining cells (**32k/2k @ 32/64, 32k/8k @ 8/32/64, and 96k/32k @ 8/32/64**) will be appended when complete; the 96k/32k low-con fills are the long pole (32k-token outputs, hours per cell).
+
+**Key finding — 8k/1k is prefill-bound on 2P4D.** The 2P4D 48-GPU peak (19,175 @ con=1024) is essentially tied with (~1.7% below) the **2P2D 32-GPU peak of 19,499** at the same 8k/1k@1024. Doubling decode (2D→4D) did **not** raise 8k/1k throughput and per-GPU efficiency fell sharply (2P2D ≈609 → 2P4D ≈399 tok/s/GPU), because both topologies use only **2 prefill nodes**. For short-ISL shapes the lever is more *prefill* (e.g. 4P2D/4P4D), not more decode.
+
+Note on 96k/32k @ con=128 (job 207083): 270/512 succeeded (~47% load-shed). 96k/32k @ con=128 **deadlocks on 1P1D/2P2D at the default timeout** (decode KV cannot hold 128 concurrent 96k-context sequences → MoRIIO deferred writes expire, `remote blocks never arrived`); **2P4D adds decode KV capacity and clears the fatal deadlock**, though it still partially sheds at this extreme shape. This is a decode-KV-capacity ceiling, not a crash. (The relevant expiry knob is the connector's `defer_timeout` — set by `MORIIO_DEFER_TIMEOUT` — **not** `VLLM_MORIIO_DEFERRED_TIMEOUT_S`/`_TRANSFER_TIMEOUT_S`, which vLLM logs as *"Unknown vLLM environment variable"* and ignores. `MORIIO_DEFER_TIMEOUT` is now forwarded into the container via `connectors/moriio.env` — see the 96k/32k @ con=128 `defer_timeout=7200` runs below.)
+
+### 1P2D EP16 (job 209216 peak; 209754 full-grid in progress) — 24 GPUs
+
+1P2D = 1 prefill + 2 decode (3 nodes, EP16). Peak-throughput hunt on the small shape; GPU count = **24**, so `Total tok/s/GPU` = Total ÷ 24. **Full grid (other shapes) is a separate in-progress sweep (job 209754, con≤1024); only the 8k/1k peak ladder is available so far.**
+
+| ISL/OSL | Concurrency | Req/s | Output tok/s | **Total tok/s** | **Total tok/s/GPU** | Median TTFT (ms) | Median TPOT (ms) |
+|---|---|---|---|---|---|---|---|
+| 8000/1000 | 128 | 1.06 | 1062.9 | **9565.6** | 398.6 | 6129 | 99.6 |
+| 8000/1000 | 256 | 1.76 | 1760.3 | **15842.9** | 660.1 | 20699 | 98.7 |
+| 8000/1000 | 512 | 1.92 | 1923.6 | **17312.7** | 721.4 | 142634 | 99.2 |
+| 8000/1000 | 1024 | 2.02 | 2021.9 | **18197.3** | 758.2 | 382513 | 98.4 |
+
+**1P2D peak = 18,197 tok/s at 8k/1k @ con=1024.** con=2048 is **not attainable** — it tail-deadlocks (hung at ~97%, 7959/8192, in both jobs 209216 and the dedicated retry 209572; no result). Adding a second decode node to 1P1D lifts the small-shape peak only ~2% (1P1D ~17.9k → 1P2D 18.2k): the 8k/1k peak is prefill/dispatch-bound (both use 1 prefill node), consistent with the 2P2D→2P4D finding below.
+
+### 4P4D EP32 (job 208387) — 64 GPUs
+
+4P4D = 4 prefill + 4 decode (8 nodes, EP32). Single point: **96k/32k @ con=128** with the high MoRIIO deferred-write timeout (`defer_timeout=7200`, confirmed forwarded into the container). GPU count = **64**.
+
+| ISL/OSL | Concurrency | Req/s | Output tok/s | **Total tok/s** | **Total tok/s/GPU** | Median TTFT (ms) | Median TPOT (ms) | Successful |
+|---|---|---|---|---|---|---|---|---|
+| 96000/32000 | 128 | ~0.003 | 105.5 | **421.95** | 6.6 | 82029 | 112.4 | 222/512 |
+
+**Read:** `defer_timeout=7200` let all 512 requests reach terminal state (vs the default-timeout hard-stall at 95/512 on the earlier 4P4D attempt 207165), but the run still **shed 290/512 (~57%)** and took **18.7 h** (P99 TTFT ~1.83 h, near the 2 h defer window). 4P4D is **worse** than 2P4D at this shape (2P4D 207083 = 270/512 @ 712 tok/s): with the same 4-decode capacity, 4P4D's extra prefill (4 vs 2) floods the decode-side KV transfer harder → more shedding. For 96k/32k @ con=128 the bottleneck is decode-KV capacity; adding prefill hurts. (**2P2D** 96k/32k @ con=128 `defer=7200` (job **209242**, 32 GPU) completed at **59/512 (~88% shed)**, 87.4 tok/s, median TTFT ~12.6 min — *worse* than both 2P4D and 4P4D even with the 2 h defer window, confirming 2-decode capacity cannot hold 128×96k sequences. **1P2D** `defer=7200` (job **209437**) still running; append when complete.)
 
 ### 1P1D vs 2P2D comparison (matched shape/concurrency)
 
@@ -212,23 +287,34 @@ Note: 270/512 requests succeeded (~47% load-shed under residual MoRIIO KV-transf
 | 4000/4000 | 64 | 1342.6 | 1281.2 | 0.95× | 83.9 | 40.0 | 0.48× |
 | 4000/4000 | 128 | 2619.6 | 2522.0 | 0.96× | 163.7 | 78.8 | 0.48× |
 | 4000/4000 | 256 | 5114.9 | 4960.5 | 0.97× | 319.7 | 155.0 | 0.48× |
+| 4000/4000 | 512 | 9861.3 | 9225.3 | 0.94× | 616.3 | 288.3 | 0.47× |
 | 8000/4000 | 8 | 253.8 | 244.5 | 0.96× | 15.9 | 7.6 | 0.48× |
 | 8000/4000 | 32 | 993.0 | 964.2 | 0.97× | 62.1 | 30.1 | 0.48× |
 | 8000/4000 | 64 | 1962.3 | 1911.0 | 0.97× | 122.6 | 59.7 | 0.49× |
 | 8000/4000 | 128 | 3831.3 | 3699.7 | 0.97× | 239.5 | 115.6 | 0.48× |
 | 8000/4000 | 256 | 7377.8 | 7139.1 | 0.97× | 461.1 | 223.1 | 0.48× |
+| 32000/2000 | 8 | 1330.9 | 1290.1 | 0.97× | 83.2 | 40.3 | 0.48× |
+| 32000/2000 | 32 | 4940.0 | 4774.0 | 0.97× | 308.8 | 149.2 | 0.48× |
+| 32000/2000 | 64 | 9040.8 | 8960.9 | 0.99× | 565.1 | 280.0 | 0.50× |
 | 32000/2000 | 128 | 13629.9 | 14562.5 | 1.07× | 851.9 | 455.1 | 0.53× |
+| 32000/8000 | 8 | 419.3 | 407.0 | 0.97× | 26.2 | 12.7 | 0.48× |
+| 32000/8000 | 32 | 1646.9 | 1602.2 | 0.97× | 102.9 | 50.1 | 0.49× |
+| 32000/8000 | 64 | 3200.0 | 3145.1 | 0.98× | 200.0 | 98.3 | 0.49× |
+| 32000/8000 | 128 | 6089.6 | 6017.4 | 0.99× | 380.6 | 188.0 | 0.49× |
 | 96000/32000 | 8 | 338.2 | 327.8 | 0.97× | 21.1 | 10.2 | 0.48× |
 | 96000/32000 | 32 | 1314.3 | 1277.5 | 0.97× | 82.1 | 39.9 | 0.49× |
 
-Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and **~19.5k tok/s (2P2D, 8000/1000 @ con=1024)**. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.07× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
+Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)**, **~18.2k tok/s (1P2D, 8000/1000 @ con=1024)**, **~19.5k tok/s (2P2D, 8000/1000 @ con=1024)**, and **~19.2k tok/s (2P4D, 8000/1000 @ con=1024)**. **Reading it:** at matched concurrency, 2P2D total tok/s is ~0.95–1.07× of 1P1D (parity) while **per-GPU is ~0.48×** — 2P2D uses 2× the GPUs (32 vs 16) for the same offered concurrency, so throughput/GPU roughly halves. To show throughput *scaling* with GPUs, concurrency would need to scale with the deployment. 2P2D also shows slightly higher TPOT (~97–99 ms vs ~93–95 ms), reflecting the cross-node EP16 decode.
 
 ## Deployment configurations
 
 | Topology | EP width | Status |
 |---|---|---|
 | 1P1D disaggregated | EP8 | ✅ NIAH validated; niah/aa_lcr pass |
+| 1P2D disaggregated | EP16 | ✅ perf-characterized (peak 18.2k tok/s @ 8k/1k con=1024) |
 | 2P2D disaggregated | EP16 | ✅ NIAH validated; niah/aa_lcr pass (unblocked vs Recipe 7) |
+| 2P4D disaggregated | EP32 | ✅ perf-characterized (peak 19.2k tok/s @ 8k/1k con=1024) |
+| 4P4D disaggregated | EP32 | ✅ perf (96k/32k @ con=128 stress; over-provisioned on prefill for this shape) |
 | Single-node TP=8 (colocated) | — | ✅ correctness/determinism control |
 
 ## Upstream issues / PRs filed
@@ -252,7 +338,7 @@ Peak total throughput observed: **~17.9k tok/s (1P1D, 8000/1000 @ con=512)** and
 | `--kv-cache-dtype` | fp8 | KV precision |
 | `AITER_BATON_TIMEOUT` | 1800 | cold-start JIT baton headroom |
 | `LOG_WAIT_TIMEOUT_SECONDS` | 9000 | long cold bring-up |
-| `VLLM_MORIIO_DEFERRED_TIMEOUT_S` / `VLLM_MORIIO_TRANSFER_TIMEOUT_S` | 600 | MoRIIO KV-write headroom |
+| `MORIIO_DEFER_TIMEOUT` (connector `defer_timeout`) | 600 (raise to 7200 for 96k@con128) | MoRIIO deferred-write expiry — the real knob (the `VLLM_MORIIO_*_TIMEOUT_S` vars are ignored by vLLM as unknown env vars). Now forwarded into the container via `connectors/moriio.env`; a submit-time export overrides it. |
 
 ## Reproducibility
 
