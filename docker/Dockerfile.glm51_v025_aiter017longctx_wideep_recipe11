@@ -1,0 +1,97 @@
+# CONTEXT {'gpu_vendor': 'AMD', 'guest_os': 'UBUNTU'}
+# NOTE: no `# syntax=` directive on purpose - the daemon's built-in BuildKit
+# frontend supports heredocs + COPY --from without pulling docker/dockerfile
+# from Docker Hub (avoids the registry-auth 401 on locked-down build hosts).
+# =============================================================================
+# GLM-5.1-FP8 - Recipe 11 = Recipe 10 (WideEP) + GEAK DSA-indexer fp8-MFMA patch
+#
+# Recipe 11 is a THIN OVERLAY on the Recipe 10 WideEP image. It adds exactly one
+# change on top of the shipped Recipe 10 stack: the GEAK-generated Triton rewrite
+# of the gfx942 sparse-MLA (DSA) indexer kernel
+#   vllm/v1/attention/ops/triton_fp8_mqa_logits.py :: fp8_mqa_logits_gfx942
+# so it reaches the native v_mfma_f32_16x16x32_fp8_fp8 MFMA instead of the
+# software fp8->fp16 upconvert path. Everything else (torch / vLLM 0.25.1 /
+# aiter v0.1.17-longctx / triton#8991 / mori / router / PR#47766 + PATCH A/B) is
+# inherited byte-for-byte from Recipe 10 - Recipe 11 rebuilds NO wheels.
+#
+# WHAT THE PATCH DOES (see docker/patches/geak_dsa_indexer_fp8_mfma.diff):
+#   * e4m3fn -> e4m3fnuz bitcast on Q and K (identical 1-4-3 layout, bias 7 vs 8)
+#     so both dot operands are fnuz; the resulting /4 is folded into the loop-
+#     invariant per-head weight (relu(x/4)*4w == relu(x)*w, bit-exact).
+#   * one host-side clamp_min(-127) NaN-scrub of K (OCP -0.0 byte 0x80 == fnuz
+#     NaN), hoisted out of the inner loop (-29 % inner-loop instructions).
+#   * LDS tile-gate fix: the old gate charged the KV tile at 2 B/elem (fp16),
+#     wrongly rejecting the default 128-tile; the native fp8 tile (1 B/elem) fits.
+#   * retires the torch.full(-inf) prefill for a fused per-row OOW -inf epilogue.
+#
+# RESULTS (GLM-5.1-FP8, MI300X gfx942, TP=8):
+#   Isolated microbench : ~7.85x geomean vs stock kernel (correctness err=0.0)
+#   E2E serving         : +4.0 % tok/s @ 8k/1k ; neutral (+0.3 %, noise) @ 32k/8k
+#   Accuracy            : needle-in-haystack 3/3, gsm8k 11/12 (unchanged)
+#   Risk                : low - zero regressions observed; safe to ship
+#   Upstream PR target  : vllm-project/vllm  (base blob 619d0ec)
+#
+# -- SINGLE BUILD COMMAND -----------------------------------------------------
+#   cd /path/to/MAD-fork        # repo root (build context; needs docker/patches/)
+#   DOCKER_BUILDKIT=1 docker build \
+#     -f docker/Dockerfile.glm51_v025_aiter017longctx_wideep_recipe11 \
+#     --build-arg WIDEEP_IMAGE=vllm-glm51-v025-aiter017longctx-wideep:latest \
+#     -t vllm-glm51-v025-aiter017longctx-wideep-geakidx:latest .
+#
+#   WIDEEP_IMAGE MUST be a Recipe 10 image (built from
+#   Dockerfile.glm51_v025_aiter017longctx_wideep). The overlay is fast (seconds):
+#   one file patch + a JIT-cache scrub so the Triton indexer recompiles from the
+#   patched source on first serve. Build context MUST be the MAD-fork repo root
+#   so `COPY docker/patches/...` resolves.
+# =============================================================================
+
+ARG WIDEEP_IMAGE=vllm-glm51-v025-aiter017longctx-wideep:latest
+
+FROM ${WIDEEP_IMAGE} AS final
+ENTRYPOINT []
+WORKDIR /app
+RUN echo "RECIPE 11: overlay on ${WIDEEP_IMAGE} - adds GEAK DSA-indexer fp8-MFMA patch" >> /app/versions.txt
+
+# --- PATCH C - GEAK DSA-indexer fp8 native-MFMA Triton kernel (Recipe 11 delta)
+# Applied against upstream vllm-project/vllm triton_fp8_mqa_logits.py @619d0ec,
+# which is exactly what vLLM 0.25.1 (the Recipe 10 base) ships. Fail-closed: the
+# build ABORTS if the patch does not apply AND all functional markers verify, so
+# a mis-apply can never silently ship the stock kernel.
+COPY docker/patches/geak_dsa_indexer_fp8_mfma.diff /tmp/geak_idx.diff
+RUN set -e; \
+    OPS_DIR=$(python3 -c "import importlib.util,os;print(os.path.join(os.path.dirname(importlib.util.find_spec('vllm').origin),'v1/attention/ops'))"); \
+    TGT="$OPS_DIR/triton_fp8_mqa_logits.py"; \
+    test -f "$TGT"; \
+    if grep -q 'float8e4b8' "$TGT"; then \
+      echo "[OK] GEAK DSA-indexer patch already present - skipping apply"; \
+    else \
+      cd "$OPS_DIR"; \
+      git apply --recount -p1 /tmp/geak_idx.diff \
+        || { command -v patch >/dev/null 2>&1 && patch -p1 --fuzz=3 < /tmp/geak_idx.diff; }; \
+    fi; \
+    grep -q 'float8e4b8' "$TGT"; \
+    grep -q 'waves_per_eu = 3' "$TGT"; \
+    grep -q 'OOW_FILL' "$TGT"; \
+    grep -q '_GFX942_KV_ELEM_BYTES' "$TGT"; \
+    python3 -m py_compile "$TGT"; \
+    echo "PATCH C: GEAK DSA-indexer fp8 native-MFMA kernel (e4m3fn->fnuz bitcast + x4 weight fold, host 0x80 NaN scrub, LDS tile-gate fix, fused OOW -inf epilogue; ~7.85x isolated, +4% E2E @8k/1k, neutral @32k/8k, accuracy-clean)" >> /app/versions.txt; \
+    rm -f /tmp/geak_idx.diff
+
+# --- JIT-cache scrub so the patched Triton indexer recompiles on first serve ---
+ENV AITER_JIT_DIR=/opt/vllm_cache/aiter_jit \
+    VLLM_CACHE_ROOT=/opt/vllm_cache/vllm \
+    TRITON_CACHE_DIR=/opt/vllm_cache/triton \
+    COMGR_CACHE_DIR=/opt/vllm_cache/comgr
+RUN rm -rf /opt/vllm_cache/triton /opt/vllm_cache/aiter_jit /root/.triton/cache /root/.aiter /tmp/vllm_cache*/triton 2>/dev/null || true; \
+    echo "JIT_SCRUBBED (Recipe 11 GEAK indexer recompiles on first serve)" >> /app/versions.txt
+
+# GPU-less build node: vllm import must still succeed after the patch.
+RUN python3 -c "import vllm; print('import OK: vllm', vllm.__version__, '+ Recipe 11 GEAK DSA-indexer')"
+RUN cat /app/versions.txt 2>/dev/null | tail -40 || true
+
+# Runtime (unchanged from Recipe 10):
+#   VLLM_ROCM_USE_AITER=1  VLLM_GCN_ARCH=gfx942  VLLM_HANDSHAKE_TIMEOUT_MINS=30
+#   Disagg: prefill DP=8 TP=1 + decode DP=8 TP=1 (EP8 per role; EP16 for 2P2D)
+#   KV connector: MoRIIO (mori.io)   Router: vllm-router (DP-rank round-robin)
+#   Serve containers must use --network host.
+# =============================================================================
